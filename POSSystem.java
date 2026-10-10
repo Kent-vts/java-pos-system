@@ -15,7 +15,9 @@ public class POSSystem extends JFrame {
     private User[] users = new User[50];
     private Sale[] sales = new Sale[500];
     private int productCount = 0, userCount = 0, saleCount = 0, nextSaleId = 1001;
-    private TransactionStack recentTransactions = new TransactionStack(100);
+    private TransactionStack recentTransactions = new TransactionStack(500); // same size as sales[] so both always stay in sync
+    private TransactionStack removedTransactions = new TransactionStack(500); // second Stack: the removed (undone) sales
+    private static final String HISTORY_FILE = "removed_history.txt";        // removed history is saved here
     private User currentUser;
 
     private JPanel content;
@@ -29,16 +31,20 @@ public class POSSystem extends JFrame {
         setSize(1050, 680);
         setMinimumSize(new Dimension(900, 600));
         setLocationRelativeTo(null);
-        seedData();
+        loadAll();
+        addWindowListener(new java.awt.event.WindowAdapter(){ public void windowClosing(java.awt.event.WindowEvent e){ saveAll(); } }); // last safety save
         showLogin();
     }
 
-    private void seedData() {
+    private void seedProducts() {
         addProduct("P001", "Bottled Water", 20.00, 40);
         addProduct("P002", "Potato Chips", 35.00, 25);
         addProduct("P003", "Chocolate Bar", 28.00, 30);
         addProduct("P004", "Instant Noodles", 18.00, 50);
         addProduct("P005", "Iced Tea", 25.00, 20);
+    }
+
+    private void seedUsers() {
         users[userCount++] = new Admin("admin", "admin123", "Store Administrator");
         users[userCount++] = new Employee("employee", "emp123", "Regular Employee");
     }
@@ -169,21 +175,21 @@ public class POSSystem extends JFrame {
             if (p == null && findProductById(pid) != null) { JOptionPane.showMessageDialog(this,"That product ID already exists."); return; }
             if (p == null) { if(productCount==products.length) { warn("Product list is full."); return; } addProduct(pid,pname,pr,qty); }
             else { p.id=pid; p.name=pname; p.price=pr; p.stock=qty; }
-            refreshProductTable(); showProducts();
+            refreshProductTable(); saveAll(); showProducts();
         } catch(Exception ex) { warn("Enter a valid name, unique ID, non-negative price, and whole-number stock."); }
     }
 
     private void restockProduct() {
         int r=productTable.getSelectedRow(); if(r<0){warnSelect();return;} Product p=findProductById(String.valueOf(productModel.getValueAt(r,0)));
         String s=JOptionPane.showInputDialog(this,"How many units should be added?","Restock",JOptionPane.QUESTION_MESSAGE); if(s==null)return;
-        try { int q=Integer.parseInt(s.trim()); if(q<=0)throw new Exception(); p.stock+=q; showProducts(); }
+        try { int q=Integer.parseInt(s.trim()); if(q<=0)throw new Exception(); p.stock+=q; saveAll(); showProducts(); }
         catch(Exception ex){warn("Enter a positive whole number.");}
     }
     private void removeProduct() {
         int r=productTable.getSelectedRow(); if(r<0){warnSelect();return;} String id=String.valueOf(productModel.getValueAt(r,0));
         if(JOptionPane.showConfirmDialog(this,"Remove this product?","Confirm",JOptionPane.YES_NO_OPTION)!=JOptionPane.YES_OPTION)return;
         for(int i=0;i<productCount;i++) if(products[i].id.equals(id)){ for(int j=i;j<productCount-1;j++)products[j]=products[j+1]; products[--productCount]=null; break; }
-        showProducts();
+        saveAll(); showProducts();
     }
     private void refreshProductTable() { if(productModel==null)return; productModel.setRowCount(0); for(int i=0;i<productCount;i++) productModel.addRow(new Object[]{products[i].id,products[i].name,String.format("%.2f",products[i].price),products[i].stock}); }
 
@@ -219,7 +225,7 @@ public class POSSystem extends JFrame {
                 for(CartItem ci:cart)if(ci.quantity>ci.product.stock){warn("Stock changed. Please review the cart.");return;}
                 for(CartItem ci:cart)ci.product.stock-=ci.quantity;
                 Sale s=new Sale(nextSaleId++,currentUser.getUsername(),cart.toArray(new CartItem[0]),total,received,LocalDateTime.now());
-                if(saleCount<sales.length)sales[saleCount++]=s; recentTransactions.push(s);
+                if(saleCount<sales.length)sales[saleCount++]=s; recentTransactions.push(s); saveAll();
                 String receipt=buildReceipt(s); JTextArea area=new JTextArea(receipt,18,32); area.setEditable(false); area.setFont(new Font(Font.MONOSPACED,Font.PLAIN,12));
                 JOptionPane.showMessageDialog(this,new JScrollPane(area),"Sale Completed",JOptionPane.INFORMATION_MESSAGE);
                 showDashboard();
@@ -240,11 +246,216 @@ public class POSSystem extends JFrame {
         transactionModel=new DefaultTableModel(new Object[]{"Receipt #","Date","Cashier","Total (₱)","Received (₱)","Change (₱)"},0){public boolean isCellEditable(int r,int c){return false;}};
         transactionTable=new JTable(transactionModel); styleTable(transactionTable);
         for(int i=saleCount-1;i>=0;i--){Sale s=sales[i]; transactionModel.addRow(new Object[]{s.id,s.date.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")),s.cashier,String.format("%.2f",s.total),String.format("%.2f",s.received),String.format("%.2f",s.received-s.total)});}
-        JPanel bottom=new JPanel(new FlowLayout(FlowLayout.LEFT)); bottom.setOpaque(false);
-        JLabel summary=new JLabel("Total recorded sales: ₱"+String.format("%.2f",getAllSales())); summary.setFont(new Font("SansSerif",Font.BOLD,15)); summary.setForeground(GREEN); bottom.add(summary);
-        JButton latest=button("Show Latest Stack Entry",LIGHT_GREEN,GREEN); latest.addActionListener(e->{Sale s=recentTransactions.peek();if(s==null)warn("The transaction Stack is empty.");else JOptionPane.showMessageDialog(this,buildReceipt(s),"Most Recent Transaction",JOptionPane.INFORMATION_MESSAGE);}); bottom.add(latest);
+        JPanel bottom=new JPanel(new GridLayout(2,1,0,6)); bottom.setOpaque(false);
+        JPanel row1=new JPanel(new FlowLayout(FlowLayout.LEFT)); row1.setOpaque(false);
+        JPanel row2=new JPanel(new FlowLayout(FlowLayout.LEFT)); row2.setOpaque(false); bottom.add(row1); bottom.add(row2);
+        JLabel summary=new JLabel("Total recorded sales: ₱"+String.format("%.2f",getAllSales())); summary.setFont(new Font("SansSerif",Font.BOLD,15)); summary.setForeground(GREEN); row1.add(summary);
+        JButton latest=button("Show Latest Stack Entry",LIGHT_GREEN,GREEN); latest.addActionListener(e->{Sale s=recentTransactions.peek();if(s==null)warn("The transaction Stack is empty.");else JOptionPane.showMessageDialog(this,buildReceipt(s),"Most Recent Transaction",JOptionPane.INFORMATION_MESSAGE);}); row2.add(latest);
+        JButton removeLatest=button("Remove Latest Entry",LIGHT_GREEN,GREEN); removeLatest.addActionListener(e->removeLatestSale()); row2.add(removeLatest);
+        JButton history=button("Removed History",LIGHT_GREEN,GREEN); history.addActionListener(e->showRemovedHistory()); row2.add(history);
+        JButton restore=button("Restore Last Removed",LIGHT_GREEN,GREEN); restore.addActionListener(e->restoreLastRemoved()); row2.add(restore);
         page.add(title,BorderLayout.NORTH); page.add(new JScrollPane(transactionTable),BorderLayout.CENTER); page.add(bottom,BorderLayout.SOUTH); content.add(page); content.revalidate(); content.repaint();
     }
+
+    /** Undo the most recent sale using the Stack (LIFO): pop() takes off the newest sale,
+     *  then we restore the stock and remove it from the sales records. */
+    private void removeLatestSale() {
+        Sale s = recentTransactions.peek();                       // look first, do not remove yet
+        if (s == null) { warn("The transaction Stack is empty."); return; }
+        int choice = JOptionPane.showConfirmDialog(this,
+            "Remove Sale #" + s.id + " (₱" + String.format("%.2f", s.total) + ") and restore its stock?",
+            "Confirm Remove", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+        s = recentTransactions.pop();                             // POP: newest sale leaves the Stack
+        s.removedAt = LocalDateTime.now(); s.removedBy = currentUser.getUsername();
+        removedTransactions.push(s);                              // PUSH it onto the removed Stack (history)
+        saveAll();                                     // keep the history in a file
+        for (CartItem ci : s.items) { Product inv = findProductById(ci.product.id); if (inv != null) inv.stock += ci.quantity; }  // put the sold items back in stock
+        if (saleCount > 0 && sales[saleCount - 1] == s) sales[--saleCount] = null; // newest sale is always last in sales[]
+        JOptionPane.showMessageDialog(this, "Sale #" + s.id + " was removed and its stock restored.",
+            "Removed", JOptionPane.INFORMATION_MESSAGE);
+        showTransactions();                                       // refresh the table and the total
+    }
+
+    /** Restore the most recently removed sale (LIFO again: the last one removed is the first one restored). */
+    private void restoreLastRemoved() {
+        Sale s = removedTransactions.peek();
+        if (s == null) { warn("There are no removed sales to restore."); return; }
+        if (saleCount >= sales.length) { warn("The sales list is full."); return; }
+        for (CartItem ci : s.items) {                             // check first, change nothing yet
+            Product inv = findProductById(ci.product.id);
+            if (inv == null) { warn("Cannot restore: product \"" + ci.product.name + "\" no longer exists."); return; }
+            if (inv.stock < ci.quantity) { warn("Not enough stock to restore Sale #" + s.id + " (" + inv.name + ")."); return; }
+        }
+        int choice = JOptionPane.showConfirmDialog(this, "Restore Sale #" + s.id + " (₱" + String.format("%.2f", s.total) + ")? Its items will be taken from stock again.",
+            "Confirm Restore", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+        s = removedTransactions.pop();                            // POP from the removed Stack
+        for (CartItem ci : s.items) { Product inv = findProductById(ci.product.id); inv.stock -= ci.quantity; ci.product = inv; }
+        s.removedAt = null; s.removedBy = null;
+        sales[saleCount++] = s; recentTransactions.push(s);       // back into the sales records and the main Stack
+        saveAll();
+        JOptionPane.showMessageDialog(this, "Sale #" + s.id + " was restored.", "Restored", JOptionPane.INFORMATION_MESSAGE);
+        showTransactions();
+    }
+
+    /** Show every removed sale, newest removal first (view only). */
+    private void showRemovedHistory() {
+        if (removedTransactions.isEmpty()) { JOptionPane.showMessageDialog(this, "No sales have been removed yet.", "Removed History", JOptionPane.INFORMATION_MESSAGE); return; }
+        DefaultTableModel m = new DefaultTableModel(new Object[]{"Receipt #","Sold On","Cashier","Total (₱)","Removed On","Removed By"},0){public boolean isCellEditable(int r,int c){return false;}};
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+        for (int i = removedTransactions.size() - 1; i >= 0; i--) {   // top of the Stack first
+            Sale s = removedTransactions.get(i);
+            m.addRow(new Object[]{s.id, s.date.format(fmt), s.cashier, String.format("%.2f", s.total), s.removedAt.format(fmt), s.removedBy});
+        }
+        JTable t = new JTable(m); styleTable(t);
+        JScrollPane sp = new JScrollPane(t); sp.setPreferredSize(new Dimension(760, 280));
+        JOptionPane.showMessageDialog(this, sp, "Removed History (newest removal first)", JOptionPane.PLAIN_MESSAGE);
+    }
+
+    // ===================== SAVING AND LOADING =====================
+    // Everything is kept in plain text files next to the program, one record per line.
+    private static final String PRODUCTS_FILE = "products.txt", USERS_FILE = "users.txt", SALES_FILE = "sales.txt";
+
+    /** Load saved data. On the very first run (no files yet) the sample data is created instead. */
+    private void loadAll() {
+        boolean haveProducts = loadProducts();
+        boolean haveUsers = loadUsers();
+        if (!haveProducts) seedProducts();
+        if (!haveUsers) seedUsers();            // also protects against being locked out with no accounts
+        loadSales();                            // needs the products to exist first
+        loadRemovedHistory();
+    }
+
+    /** Save everything. Called after every change and once more when the window closes. */
+    private void saveAll() {
+        saveProducts(); saveUsers(); saveSales(); saveRemovedHistory();
+    }
+
+    /** Write the lines to a temporary file first, then swap it in, so a crash can never leave a half-written file. */
+    private void writeLines(String fileName, java.util.List<String> lines) {
+        try {
+            java.nio.file.Path target = java.nio.file.Paths.get(fileName), tmp = java.nio.file.Paths.get(fileName + ".tmp");
+            java.nio.file.Files.write(tmp, lines, java.nio.charset.StandardCharsets.UTF_8);
+            java.nio.file.Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.io.IOException e) { warn("Could not save " + fileName + "."); }
+    }
+
+    private java.util.List<String> readLines(String fileName) {
+        try { return java.nio.file.Files.readAllLines(java.nio.file.Paths.get(fileName), java.nio.charset.StandardCharsets.UTF_8); }
+        catch (java.io.IOException e) { return null; }      // null = no usable file
+    }
+
+    private String itemsToText(CartItem[] items) {
+        StringBuilder b = new StringBuilder();
+        for (CartItem ci : items) {
+            if (b.length() > 0) b.append(';');
+            b.append(clean(ci.product.id)).append('~').append(clean(ci.product.name)).append('~').append(ci.product.price).append('~').append(ci.quantity);
+        }
+        return b.toString();
+    }
+
+    private CartItem[] textToItems(String text) {
+        java.util.ArrayList<CartItem> list = new java.util.ArrayList<>();
+        for (String it : text.split(";")) {
+            if (it.isEmpty()) continue;
+            String[] f = it.split("~");
+            Product prod = findProductById(f[0]);                                  // use the real product if it still exists
+            if (prod == null) prod = new Product(f[0], f[1], Double.parseDouble(f[2]), 0);  // otherwise keep a copy of its details
+            list.add(new CartItem(prod, Integer.parseInt(f[3])));
+        }
+        return list.toArray(new CartItem[0]);
+    }
+
+    private void saveProducts() {
+        java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+        for (int i = 0; i < productCount; i++) lines.add(clean(products[i].id) + "|" + clean(products[i].name) + "|" + products[i].price + "|" + products[i].stock);
+        writeLines(PRODUCTS_FILE, lines);
+    }
+
+    private boolean loadProducts() {
+        java.util.List<String> lines = readLines(PRODUCTS_FILE);
+        if (lines == null) return false;
+        for (String line : lines) {
+            try { String[] p = line.split("\\|", -1); addProduct(p[0], p[1], Double.parseDouble(p[2]), Integer.parseInt(p[3])); }
+            catch (Exception damagedLine) { /* skip a damaged line */ }
+        }
+        return true;
+    }
+
+    // Usernames and passwords are URL-encoded so any character can be saved safely.
+    private String enc(String t) { try { return java.net.URLEncoder.encode(t, "UTF-8"); } catch (java.io.UnsupportedEncodingException e) { return t; } }
+    private String dec(String t) { try { return java.net.URLDecoder.decode(t, "UTF-8"); } catch (java.io.UnsupportedEncodingException e) { return t; } }
+
+    private void saveUsers() {
+        java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+        for (int i = 0; i < userCount; i++) lines.add(users[i].getRole() + "|" + enc(users[i].getUsername()) + "|" + enc(users[i].password) + "|" + enc(users[i].getFullName()));
+        writeLines(USERS_FILE, lines);
+    }
+
+    private boolean loadUsers() {
+        java.util.List<String> lines = readLines(USERS_FILE);
+        if (lines == null) return false;
+        for (String line : lines) {
+            try {
+                String[] p = line.split("\\|", -1);
+                if (userCount >= users.length) break;
+                users[userCount++] = p[0].equals("Admin") ? new Admin(dec(p[1]), dec(p[2]), dec(p[3])) : new Employee(dec(p[1]), dec(p[2]), dec(p[3]));
+            } catch (Exception damagedLine) { /* skip a damaged line */ }
+        }
+        return userCount > 0;
+    }
+
+    private void saveSales() {
+        java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+        for (int i = 0; i < saleCount; i++) {        // oldest first, so loading in order rebuilds the same Stack
+            Sale s = sales[i];
+            lines.add(s.id + "|" + clean(s.cashier) + "|" + s.total + "|" + s.received + "|" + s.date + "|" + itemsToText(s.items));
+        }
+        writeLines(SALES_FILE, lines);
+    }
+
+    private void loadSales() {
+        java.util.List<String> lines = readLines(SALES_FILE);
+        if (lines == null) return;
+        for (String line : lines) {
+            try {
+                String[] p = line.split("\\|", -1);
+                if (saleCount >= sales.length) break;
+                Sale s = new Sale(Integer.parseInt(p[0]), p[1], textToItems(p[5]), Double.parseDouble(p[2]), Double.parseDouble(p[3]), LocalDateTime.parse(p[4]));
+                sales[saleCount++] = s; recentTransactions.push(s);      // the Stack is rebuilt too: newest sale ends on top
+                if (s.id >= nextSaleId) nextSaleId = s.id + 1;
+            } catch (Exception damagedLine) { /* skip a damaged line */ }
+        }
+    }
+
+    /** Save the removed Stack, one sale per line, bottom of the Stack first. */
+    private void saveRemovedHistory() {
+        java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+        for (int i = 0; i < removedTransactions.size(); i++) {
+            Sale s = removedTransactions.get(i);
+            lines.add(s.id + "|" + clean(s.cashier) + "|" + s.total + "|" + s.received + "|" + s.date + "|" + s.removedAt + "|" + clean(s.removedBy) + "|" + itemsToText(s.items));
+        }
+        writeLines(HISTORY_FILE, lines);
+    }
+
+    /** Load the removed history at start-up. Pushing line by line rebuilds the same Stack order. */
+    private void loadRemovedHistory() {
+        java.util.List<String> lines = readLines(HISTORY_FILE);
+        if (lines == null) return;
+        for (String line : lines) {
+            try {
+                String[] p = line.split("\\|", -1);
+                if (p.length < 8) continue;
+                Sale s = new Sale(Integer.parseInt(p[0]), p[1], textToItems(p[7]), Double.parseDouble(p[2]), Double.parseDouble(p[3]), LocalDateTime.parse(p[4]));
+                s.removedAt = LocalDateTime.parse(p[5]); s.removedBy = p[6];
+                removedTransactions.push(s);
+                if (s.id >= nextSaleId) nextSaleId = s.id + 1;    // never reuse a receipt number
+            } catch (Exception damagedLine) { /* skip a damaged line */ }
+        }
+    }
+
+    private String clean(String t) { return t.replaceAll("[|;~\\r\\n]", " "); }
 
     private void showEmployees() {
         if(!(currentUser instanceof Admin)){deny();return;}
@@ -258,9 +469,9 @@ public class POSSystem extends JFrame {
             if(JOptionPane.showConfirmDialog(this,fields,"Register Employee",JOptionPane.OK_CANCEL_OPTION)!=JOptionPane.OK_OPTION)return;
             if(un.getText().trim().isEmpty()||pw.getText().isEmpty()||fn.getText().trim().isEmpty()){warn("All fields are required.");return;}
             if(findUser(un.getText().trim())!=null){warn("Username already exists.");return;} if(userCount==users.length){warn("Employee list is full.");return;}
-            users[userCount++]=new Employee(un.getText().trim(),pw.getText(),fn.getText().trim()); showEmployees();
+            users[userCount++]=new Employee(un.getText().trim(),pw.getText(),fn.getText().trim()); saveAll(); showEmployees();
         });
-        JButton remove=button("Remove Selected",new Color(250,232,230),new Color(150,55,45)); remove.addActionListener(e->{int r=table.getSelectedRow();if(r<0){warnSelect();return;}String un=String.valueOf(model.getValueAt(r,0));if(un.equals(currentUser.getUsername())){warn("You cannot remove the account currently in use.");return;}if(JOptionPane.showConfirmDialog(this,"Remove employee account?","Confirm",JOptionPane.YES_NO_OPTION)!=JOptionPane.YES_OPTION)return;for(int i=0;i<userCount;i++)if(users[i].getUsername().equals(un)){for(int j=i;j<userCount-1;j++)users[j]=users[j+1];users[--userCount]=null;break;}showEmployees();});
+        JButton remove=button("Remove Selected",new Color(250,232,230),new Color(150,55,45)); remove.addActionListener(e->{int r=table.getSelectedRow();if(r<0){warnSelect();return;}String un=String.valueOf(model.getValueAt(r,0));if(un.equals(currentUser.getUsername())){warn("You cannot remove the account currently in use.");return;}if(JOptionPane.showConfirmDialog(this,"Remove employee account?","Confirm",JOptionPane.YES_NO_OPTION)!=JOptionPane.YES_OPTION)return;for(int i=0;i<userCount;i++)if(users[i].getUsername().equals(un)){for(int j=i;j<userCount-1;j++)users[j]=users[j+1];users[--userCount]=null;break;}saveAll();showEmployees();});
         JPanel actions=new JPanel(new FlowLayout(FlowLayout.LEFT));actions.setOpaque(false);actions.add(add);actions.add(remove);page.add(title,BorderLayout.NORTH);page.add(new JScrollPane(table),BorderLayout.CENTER);page.add(actions,BorderLayout.SOUTH);content.add(page);content.revalidate();content.repaint();
     }
 
@@ -289,11 +500,13 @@ public class POSSystem extends JFrame {
     static class Employee extends User { Employee(String u,String p,String f){super(u,p,f);} String getRole(){return "Employee";} }
     static class Product { String id,name; double price; int stock; Product(String id,String name,double price,int stock){this.id=id;this.name=name;this.price=price;this.stock=stock;} }
     static class CartItem { Product product; int quantity; CartItem(Product p,int q){product=p;quantity=q;} }
-    static class Sale { int id; String cashier; CartItem[] items; double total,received; LocalDateTime date; Sale(int id,String cashier,CartItem[] items,double total,double received,LocalDateTime date){this.id=id;this.cashier=cashier;this.items=items;this.total=total;this.received=received;this.date=date;} }
+    static class Sale { LocalDateTime removedAt; String removedBy; int id; String cashier; CartItem[] items; double total,received; LocalDateTime date; Sale(int id,String cashier,CartItem[] items,double total,double received,LocalDateTime date){this.id=id;this.cashier=cashier;this.items=items;this.total=total;this.received=received;this.date=date;} }
     static class TransactionStack {
         private Sale[] items; private int top=-1;
         TransactionStack(int capacity){items=new Sale[capacity];}
         boolean isEmpty(){return top==-1;}
+        int size(){return top+1;}
+        Sale get(int i){return items[i];}   // i=0 is the bottom, size()-1 is the top
         void push(Sale sale){if(top<items.length-1)items[++top]=sale;}
         Sale peek(){return isEmpty()?null:items[top];}
         Sale pop(){if(isEmpty())return null;Sale s=items[top];items[top--]=null;return s;}
